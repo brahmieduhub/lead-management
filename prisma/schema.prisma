@@ -1,0 +1,306 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== ENUMS ====================
+
+enum Role {
+  ADMIN
+  FACULTY
+  CAMPUS_HEAD
+  TELE_CALLER
+  VIEWER
+}
+
+enum ExamType {
+  JEE
+  NEET
+}
+
+enum DriftStatus {
+  IMPROVED_SIGNIFICANTLY
+  DEGRADED_SIGNIFICANTLY
+  STABLE
+  CONSISTENT_TOPPER
+}
+
+enum Difficulty {
+  EASY
+  MODERATE
+  DIFFICULT
+  JUST_RIGHT
+}
+
+enum AttemptResult {
+  CORRECT
+  WRONG
+  UNATTEMPTED
+}
+
+enum AssessmentStatus {
+  DRAFT
+  PUBLISHED
+  RESULTS_LOCKED
+}
+
+// ==================== MASTER DATA ====================
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  role         Role     @default(TELE_CALLER)
+  campusId     String?
+  campus       Campus?  @relation(fields: [campusId], references: [id])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  difficultyTags AssessmentSubjectDifficulty[]
+
+  @@map("users")
+}
+
+model Campus {
+  id        String   @id @default(cuid())
+  name      String
+  city      String
+  state     String
+  createdAt DateTime @default(now())
+
+  batches      Batch[]
+  users        User[]
+  rankSummaries CampusRankSummary[]
+
+  @@map("campuses")
+}
+
+model Batch {
+  id          String    @id @default(cuid())
+  name        String
+  stream      ExamType
+  sessionYear String
+  campusId    String
+  campus      Campus    @relation(fields: [campusId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+
+  students    Student[]
+  assessments Assessment[]
+
+  @@map("batches")
+}
+
+model Student {
+  id        String   @id @default(cuid())
+  rollNo    String   @unique
+  name      String
+  email     String?
+  phone     String?
+  batchId   String
+  batch     Batch    @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  testResults        TestResult[]
+  performanceTrends  PerformanceTrend[]
+  diagnostics        DiagnosticReport[]
+
+  @@index([batchId])
+  @@map("students")
+}
+
+// ==================== ASSESSMENTS ====================
+
+model Assessment {
+  id          String           @id @default(cuid())
+  title       String
+  batchId     String
+  batch       Batch            @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  examDate    DateTime
+  totalMarks  Float
+  status      AssessmentStatus @default(DRAFT)
+  aiSummary   Json?            // Gemini-generated center-level weekly summary
+  createdAt   DateTime         @default(now())
+
+  testResults           TestResult[]
+  subjectDifficulties   AssessmentSubjectDifficulty[]
+  campusRankSummaries   CampusRankSummary[]
+  performanceTrends     PerformanceTrend[]
+  diagnostics           DiagnosticReport[]
+  assessmentQuestions   AssessmentQuestion[]
+
+  @@index([batchId, examDate])
+  @@map("assessments")
+}
+
+model AssessmentSubjectDifficulty {
+  id            String     @id @default(cuid())
+  assessmentId  String
+  assessment    Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  subject       String
+  difficulty    Difficulty
+  taggedByUserId String?
+  taggedByUser  User?      @relation(fields: [taggedByUserId], references: [id])
+  createdAt     DateTime   @default(now())
+
+  @@unique([assessmentId, subject])
+  @@map("assessment_subject_difficulties")
+}
+
+// ==================== RESULTS & TRENDS ====================
+
+model TestResult {
+  id           String      @id @default(cuid())
+  assessmentId String
+  assessment   Assessment  @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  studentId    String
+  student      Student     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  totalMarks   Float
+  percentage   Float
+  percentile   Float?
+  zScore       Float?
+  campusRank   Int?
+  overallRank  Int?
+  present      Boolean     @default(true)
+  rawJson      Json?
+  createdAt    DateTime    @default(now())
+
+  subjectScores SubjectScore[]
+  questionResponses    StudentQuestionResponse[]
+  subtopicSummaries    StudentSubtopicSummary[]
+
+  @@unique([assessmentId, studentId])
+  @@index([studentId, assessmentId])
+  @@map("student_test_results")
+}
+
+model SubjectScore {
+  id           String     @id @default(cuid())
+  testResultId String
+  testResult   TestResult @relation(fields: [testResultId], references: [id], onDelete: Cascade)
+  subject      String
+  marks        Float
+  maxMarks     Float
+  percentile   Float?
+  zScore       Float?
+
+  @@index([testResultId])
+  @@map("subject_scores")
+}
+
+model PerformanceTrend {
+  id           String      @id @default(cuid())
+  studentId    String
+  student      Student     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  assessmentId String
+  assessment   Assessment  @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  rollingAvg3  Float?
+  rollingAvg5  Float?
+  velocity     Float?
+  driftStatus  DriftStatus
+  statusFrom   Float?
+  statusTo     Float?
+  createdAt    DateTime    @default(now())
+
+  @@unique([studentId, assessmentId])
+  @@index([studentId, assessmentId])
+  @@map("student_performance_trends")
+}
+
+model CampusRankSummary {
+  id           String     @id @default(cuid())
+  assessmentId String
+  assessment   Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  campusId     String
+  campus       Campus     @relation(fields: [campusId], references: [id], onDelete: Cascade)
+  top15Json    Json
+  generatedAt  DateTime   @default(now())
+
+  @@unique([assessmentId, campusId])
+  @@map("campus_rank_summaries")
+}
+
+// ==================== AI DIAGNOSTICS ====================
+
+model DiagnosticReport {
+  id            String      @id @default(cuid())
+  studentId     String
+  student       Student     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  assessmentId  String?
+  assessment    Assessment? @relation(fields: [assessmentId], references: [id], onDelete: SetNull)
+  summary       String
+  strongSubjects Json
+  weakSubjects  Json
+  revisionPlan  String
+  model         String      @default("gemini-1.5-flash")
+  fallbackUsed  Boolean     @default(false)
+  createdAt     DateTime    @default(now())
+
+  @@index([studentId, createdAt])
+  @@map("diagnostic_reports")
+}
+
+// ==================== QUESTION-WISE ANALYSIS ====================
+
+// One row per question in an assessment paper
+// Populated via "question-mapping" upload (CSV/XLS: QuestionNo, Subject, Chapter, Subtopic, MaxMarks, CorrectKey)
+model AssessmentQuestion {
+  id           String     @id @default(cuid())
+  assessmentId String
+  assessment   Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  questionNo   Int        // Sequential position: 1, 2, 3 … N
+  platformQId  String?    // Optional: external question ID (e.g. 887527) from question bank
+  subject      String     // e.g. MATHS / PHY / CHEM / BIO
+  chapter      String?    // e.g. "Neural Control"
+  subtopic     String?    // e.g. "Brain Parts"
+  maxMarks     Float      @default(1)
+  correctKey   String?    // A / B / C / D
+
+  responses    StudentQuestionResponse[]
+
+  @@unique([assessmentId, questionNo])
+  @@index([assessmentId])
+  @@map("assessment_questions")
+}
+
+// Per-student, per-question response imported from question-wise XLS
+model StudentQuestionResponse {
+  id                   String             @id @default(cuid())
+  testResultId         String
+  testResult           TestResult         @relation(fields: [testResultId], references: [id], onDelete: Cascade)
+  assessmentQuestionId String
+  assessmentQuestion   AssessmentQuestion @relation(fields: [assessmentQuestionId], references: [id], onDelete: Cascade)
+  studentAnswer        String?            // A / B / C / D  (null = unattempted)
+  result               AttemptResult
+  marksScored          Float
+
+  @@unique([testResultId, assessmentQuestionId])
+  @@index([testResultId])
+  @@map("student_question_responses")
+}
+
+// Pre-computed subtopic accuracy per student per assessment (computed after question-wise import)
+model StudentSubtopicSummary {
+  id           String     @id @default(cuid())
+  testResultId String
+  testResult   TestResult @relation(fields: [testResultId], references: [id], onDelete: Cascade)
+  assessmentId String
+  subject      String
+  chapter      String
+  subtopic     String
+  totalQs      Int
+  correctQs    Int
+  wrongQs      Int
+  unattemptedQs Int       @default(0)
+  accuracy     Float      // correctQs / totalQs * 100
+
+  @@unique([testResultId, subject, chapter, subtopic])
+  @@index([testResultId])
+  @@index([assessmentId, subject])
+  @@map("student_subtopic_summaries")
+}
