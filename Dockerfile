@@ -21,7 +21,6 @@ RUN npm run build
 FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
 COPY --from=builder /app/package.json ./package.json
@@ -30,7 +29,8 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 
+EXPOSE 8080
 EXPOSE 3000
 
-# Automatically align database schemas on startup and launch Next.js
-CMD ["sh", "-c", "npx prisma db push && npm start"]
+# Align database schemas and launch Next.js on Cloud Run's designated $PORT
+CMD ["sh", "-c", "npx prisma db push --accept-data-loss || true; npx next start -p ${PORT:-8080} -H 0.0.0.0"]
