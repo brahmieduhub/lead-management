@@ -141,10 +141,35 @@ export async function authenticate(
   email: string,
   password: string
 ): Promise<SessionUser | null> {
-  const user = await prisma.user.findUnique({
+  let user = await prisma.user.findUnique({
     where: { email },
     include: { campus: true },
   });
+
+  // Auto-bootstrap default superadmin if database has no users yet
+  if (!user) {
+    const userCount = await prisma.user.count();
+    if (userCount === 0 && (email === "superadmin@eduhub.com" || email === "admin@brahmieduhub.in")) {
+      const { hash } = await import("bcryptjs");
+      const passwordHash = await hash(password, 10);
+      
+      const campus = await prisma.campus.create({
+        data: { name: "Hyderabad Main Center", city: "Hyderabad", state: "Telangana" }
+      });
+
+      user = await prisma.user.create({
+        data: {
+          email,
+          name: "Super Administrator",
+          passwordHash,
+          role: "ADMIN",
+          campusId: null
+        },
+        include: { campus: true }
+      });
+    }
+  }
+
   if (!user) return null;
   const { compare } = await import("bcryptjs");
   const ok = await compare(password, user.passwordHash);
