@@ -523,37 +523,44 @@ export async function POST(req: Request) {
     });
     const existingMap = new Map(existingStudentsList.map((s) => [s.rollNo, s]));
 
-    // Parallelize student upserts
-    await Promise.all(
-      uniqueStudentRows.map(async (item) => {
-        const existing = existingMap.get(item.rollNo);
-        if (existing) {
-          if (!isSuper && userCampusId && existing.batch.campusId !== userCampusId) {
-            skipped++;
-            return;
-          }
-          studentMap.set(item.rollNo, existing.id);
-          if ((item.name && item.name !== existing.name) || (item.phone && !existing.phone)) {
-            await prisma.student.update({
-              where: { id: existing.id },
-              data: { name: item.name || existing.name, phone: item.phone || existing.phone },
+    // Parallelize student upserts in controlled chunks of 10 to protect connection pool
+    const studentChunks = [];
+    for (let i = 0; i < uniqueStudentRows.length; i += 10) {
+      studentChunks.push(uniqueStudentRows.slice(i, i + 10));
+    }
+
+    for (const chunk of studentChunks) {
+      await Promise.all(
+        chunk.map(async (item) => {
+          const existing = existingMap.get(item.rollNo);
+          if (existing) {
+            if (!isSuper && userCampusId && existing.batch.campusId !== userCampusId) {
+              skipped++;
+              return;
+            }
+            studentMap.set(item.rollNo, existing.id);
+            if ((item.name && item.name !== existing.name) || (item.phone && !existing.phone)) {
+              await prisma.student.update({
+                where: { id: existing.id },
+                data: { name: item.name || existing.name, phone: item.phone || existing.phone },
+              });
+              studentsUpdated++;
+            }
+          } else {
+            const created = await prisma.student.create({
+              data: {
+                rollNo: item.rollNo,
+                name: item.name,
+                phone: item.phone,
+                batchId: targetBatch.id,
+              },
             });
-            studentsUpdated++;
+            studentMap.set(item.rollNo, created.id);
+            studentsCreated++;
           }
-        } else {
-          const created = await prisma.student.create({
-            data: {
-              rollNo: item.rollNo,
-              name: item.name,
-              phone: item.phone,
-              batchId: targetBatch.id,
-            },
-          });
-          studentMap.set(item.rollNo, created.id);
-          studentsCreated++;
-        }
-      })
-    );
+        })
+      );
+    }
 
     if (uploadType === "students") {
       return NextResponse.json({
@@ -615,100 +622,109 @@ export async function POST(req: Request) {
       const maxMarksPerSubject = finalMaxMarks / subjectCount;
       let sheetImported = 0;
 
-      // Parallelize test result creations
-      await Promise.all(
-        sheet.parsedData.map(async (item) => {
-          const studentId = studentMap.get(item.rollNo);
-          if (!studentId) {
-            skipped++;
-            return;
-          }
+      // Parallelize test result creations in chunks of 10
+      const parsedDataChunks = [];
+      for (let i = 0; i < sheet.parsedData.length; i += 10) {
+        parsedDataChunks.push(sheet.parsedData.slice(i, i + 10));
+      }
 
-          const std = standardized.get(studentId);
-          const computedPercentage =
-            item.percentage !== undefined
-              ? item.percentage
-              : std?.percentage ?? Number(((item.totalMarks / finalMaxMarks) * 100).toFixed(2));
-          const computedCampusRank = item.rank || std?.campusRank || 1;
+      for (const chunk of parsedDataChunks) {
+        await Promise.all(
+          chunk.map(async (item) => {
+            const studentId = studentMap.get(item.rollNo);
+            if (!studentId) {
+              skipped++;
+              return;
+            }
 
-          const explicitSubjectScores = item.subjectScores.map((s) => ({
-            subject: s.subject,
-            marks: s.marks,
-            maxMarks: maxMarksPerSubject,
-          }));
-          const fallbackSubjectScores = sheet.detectedSubjects.map((sub) => ({
-            subject: sub,
-            marks: Number((item.totalMarks / sheet.detectedSubjects.length).toFixed(1)),
-            maxMarks: maxMarksPerSubject,
-          }));
+            const std = standardized.get(studentId);
+            const computedPercentage =
+              item.percentage !== undefined
+                ? item.percentage
+                : std?.percentage ?? Number(((item.totalMarks / finalMaxMarks) * 100).toFixed(2));
+            const computedCampusRank = item.rank || std?.campusRank || 1;
 
-          await prisma.testResult.create({
-            data: {
-              assessmentId: assessment.id,
-              studentId,
-              totalMarks: item.totalMarks,
-              percentage: computedPercentage,
-              percentile: std?.percentile ?? 100,
-              zScore: std?.zScore ?? 0,
-              campusRank: computedCampusRank,
-              overallRank: computedCampusRank,
-              present: true,
-              subjectScores: {
-                create: explicitSubjectScores.length > 0 ? explicitSubjectScores : fallbackSubjectScores,
-              },
-            },
-          });
+            const explicitSubjectScores = item.subjectScores.map((s) => ({
+              subject: s.subject,
+              marks: s.marks,
+              maxMarks: maxMarksPerSubject,
+            }));
+            const fallbackSubjectScores = sheet.detectedSubjects.map((sub) => ({
+              subject: sub,
+              marks: Number((item.totalMarks / sheet.detectedSubjects.length).toFixed(1)),
+              maxMarks: maxMarksPerSubject,
+            }));
 
-          sheetImported++;
-          resultsImported++;
-        })
-      );
-
-      // Parallelize performance trends computation
-      await Promise.all(
-        sheet.parsedData.map(async (item) => {
-          const studentId = studentMap.get(item.rollNo);
-          if (!studentId) return;
-
-          const studentResults = await prisma.testResult.findMany({
-            where: { studentId },
-            orderBy: { assessment: { examDate: "asc" } },
-            include: { assessment: true },
-          });
-
-          const percentiles = studentResults.map((r) => r.percentile ?? 0);
-          const percentages = studentResults.map((r) => r.percentage);
-          const latestIdx = studentResults.findIndex((r) => r.assessmentId === assessment.id);
-
-          if (latestIdx >= 0) {
-            const recent = percentiles.slice(0, latestIdx + 1);
-            const prevPercentile = latestIdx > 0 ? percentiles[latestIdx - 1] : percentiles[latestIdx];
-            const drift = classifyDrift(prevPercentile, percentiles[latestIdx], recent);
-
-            await prisma.performanceTrend.upsert({
-              where: { studentId_assessmentId: { studentId, assessmentId: assessment.id } },
-              update: {
-                rollingAvg3: rollingAverage(percentages.slice(0, latestIdx + 1), 3),
-                rollingAvg5: rollingAverage(percentages.slice(0, latestIdx + 1), 5),
-                velocity: computeVelocity(percentages.slice(0, latestIdx + 1)),
-                driftStatus: drift,
-                statusFrom: latestIdx > 0 ? percentiles[latestIdx - 1] : null,
-                statusTo: percentiles[latestIdx],
-              },
-              create: {
-                studentId,
+            await prisma.testResult.create({
+              data: {
                 assessmentId: assessment.id,
-                rollingAvg3: rollingAverage(percentages.slice(0, latestIdx + 1), 3),
-                rollingAvg5: rollingAverage(percentages.slice(0, latestIdx + 1), 5),
-                velocity: computeVelocity(percentages.slice(0, latestIdx + 1)),
-                driftStatus: drift,
-                statusFrom: latestIdx > 0 ? percentiles[latestIdx - 1] : null,
-                statusTo: percentiles[latestIdx],
+                studentId,
+                totalMarks: item.totalMarks,
+                percentage: computedPercentage,
+                percentile: std?.percentile ?? 100,
+                zScore: std?.zScore ?? 0,
+                campusRank: computedCampusRank,
+                overallRank: computedCampusRank,
+                present: true,
+                subjectScores: {
+                  create: explicitSubjectScores.length > 0 ? explicitSubjectScores : fallbackSubjectScores,
+                },
               },
             });
-          }
-        })
-      );
+
+            sheetImported++;
+            resultsImported++;
+          })
+        );
+      }
+
+      // Parallelize performance trends computation in chunks of 10
+      for (const chunk of parsedDataChunks) {
+        await Promise.all(
+          chunk.map(async (item) => {
+            const studentId = studentMap.get(item.rollNo);
+            if (!studentId) return;
+
+            const studentResults = await prisma.testResult.findMany({
+              where: { studentId },
+              orderBy: { assessment: { examDate: "asc" } },
+              include: { assessment: true },
+            });
+
+            const percentiles = studentResults.map((r) => r.percentile ?? 0);
+            const percentages = studentResults.map((r) => r.percentage);
+            const latestIdx = studentResults.findIndex((r) => r.assessmentId === assessment.id);
+
+            if (latestIdx >= 0) {
+              const recent = percentiles.slice(0, latestIdx + 1);
+              const prevPercentile = latestIdx > 0 ? percentiles[latestIdx - 1] : percentiles[latestIdx];
+              const drift = classifyDrift(prevPercentile, percentiles[latestIdx], recent);
+
+              await prisma.performanceTrend.upsert({
+                where: { studentId_assessmentId: { studentId, assessmentId: assessment.id } },
+                update: {
+                  rollingAvg3: rollingAverage(percentages.slice(0, latestIdx + 1), 3),
+                  rollingAvg5: rollingAverage(percentages.slice(0, latestIdx + 1), 5),
+                  velocity: computeVelocity(percentages.slice(0, latestIdx + 1)),
+                  driftStatus: drift,
+                  statusFrom: latestIdx > 0 ? percentiles[latestIdx - 1] : null,
+                  statusTo: percentiles[latestIdx],
+                },
+                create: {
+                  studentId,
+                  assessmentId: assessment.id,
+                  rollingAvg3: rollingAverage(percentages.slice(0, latestIdx + 1), 3),
+                  rollingAvg5: rollingAverage(percentages.slice(0, latestIdx + 1), 5),
+                  velocity: computeVelocity(percentages.slice(0, latestIdx + 1)),
+                  driftStatus: drift,
+                  statusFrom: latestIdx > 0 ? percentiles[latestIdx - 1] : null,
+                  statusTo: percentiles[latestIdx],
+                },
+              });
+            }
+          })
+        );
+      }
 
       const top15Results = await prisma.testResult.findMany({
         where: { assessmentId: assessment.id },

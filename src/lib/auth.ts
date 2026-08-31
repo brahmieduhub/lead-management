@@ -85,14 +85,13 @@ export function isCenterAdmin(user: SessionUser | null): boolean {
 }
 
 export function isReadOnly(user: SessionUser | null): boolean {
-  return !user || user.role === "VIEWER" || user.role === "TELE_CALLER" || user.role === "FACULTY";
+  return !user || user.role === "VIEWER" || user.role === "TELE_CALLER";
 }
 
 export function canUpload(user: SessionUser | null): boolean {
   if (!user) return false;
-  // Center Admins can only upload to their own center
-  if (user.role === "CAMPUS_HEAD") return !!user.campusId;
-  return user.role === "ADMIN"; // Super Admin can upload anywhere
+  if (user.role === "CAMPUS_HEAD" || user.role === "FACULTY") return true;
+  return user.role === "ADMIN";
 }
 
 export function canManageCenters(user: SessionUser | null): boolean {
