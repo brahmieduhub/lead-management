@@ -514,40 +514,46 @@ export async function POST(req: Request) {
     }
 
     const uniqueStudentRows = Array.from(allRowsByRoll.values());
+    const rollNos = uniqueStudentRows.map((r) => r.rollNo);
 
-    for (const item of uniqueStudentRows) {
-      const existing = await prisma.student.findUnique({
-        where: { rollNo: item.rollNo },
-        include: { batch: true },
-      });
+    // Bulk-fetch all existing students in 1 single database query
+    const existingStudentsList = await prisma.student.findMany({
+      where: { rollNo: { in: rollNos } },
+      include: { batch: true },
+    });
+    const existingMap = new Map(existingStudentsList.map((s) => [s.rollNo, s]));
 
-      if (existing) {
-        if (!isSuper && userCampusId && existing.batch.campusId !== userCampusId) {
-          skipped++;
-          continue;
-        }
-
-        studentMap.set(item.rollNo, existing.id);
-        if ((item.name && item.name !== existing.name) || (item.phone && !existing.phone)) {
-          await prisma.student.update({
-            where: { id: existing.id },
-            data: { name: item.name || existing.name, phone: item.phone || existing.phone },
+    // Parallelize student upserts
+    await Promise.all(
+      uniqueStudentRows.map(async (item) => {
+        const existing = existingMap.get(item.rollNo);
+        if (existing) {
+          if (!isSuper && userCampusId && existing.batch.campusId !== userCampusId) {
+            skipped++;
+            return;
+          }
+          studentMap.set(item.rollNo, existing.id);
+          if ((item.name && item.name !== existing.name) || (item.phone && !existing.phone)) {
+            await prisma.student.update({
+              where: { id: existing.id },
+              data: { name: item.name || existing.name, phone: item.phone || existing.phone },
+            });
+            studentsUpdated++;
+          }
+        } else {
+          const created = await prisma.student.create({
+            data: {
+              rollNo: item.rollNo,
+              name: item.name,
+              phone: item.phone,
+              batchId: targetBatch.id,
+            },
           });
-          studentsUpdated++;
+          studentMap.set(item.rollNo, created.id);
+          studentsCreated++;
         }
-      } else {
-        const created = await prisma.student.create({
-          data: {
-            rollNo: item.rollNo,
-            name: item.name,
-            phone: item.phone,
-            batchId: targetBatch.id,
-          },
-        });
-        studentMap.set(item.rollNo, created.id);
-        studentsCreated++;
-      }
-    }
+      })
+    );
 
     if (uploadType === "students") {
       return NextResponse.json({
@@ -609,94 +615,100 @@ export async function POST(req: Request) {
       const maxMarksPerSubject = finalMaxMarks / subjectCount;
       let sheetImported = 0;
 
-      for (const item of sheet.parsedData) {
-        const studentId = studentMap.get(item.rollNo);
-        if (!studentId) {
-          skipped++;
-          continue;
-        }
+      // Parallelize test result creations
+      await Promise.all(
+        sheet.parsedData.map(async (item) => {
+          const studentId = studentMap.get(item.rollNo);
+          if (!studentId) {
+            skipped++;
+            return;
+          }
 
-        const std = standardized.get(studentId);
-        const computedPercentage =
-          item.percentage !== undefined
-            ? item.percentage
-            : std?.percentage ?? Number(((item.totalMarks / finalMaxMarks) * 100).toFixed(2));
-        const computedCampusRank = item.rank || std?.campusRank || 1;
+          const std = standardized.get(studentId);
+          const computedPercentage =
+            item.percentage !== undefined
+              ? item.percentage
+              : std?.percentage ?? Number(((item.totalMarks / finalMaxMarks) * 100).toFixed(2));
+          const computedCampusRank = item.rank || std?.campusRank || 1;
 
-        const explicitSubjectScores = item.subjectScores.map((s) => ({
-          subject: s.subject,
-          marks: s.marks,
-          maxMarks: maxMarksPerSubject,
-        }));
-        const fallbackSubjectScores = sheet.detectedSubjects.map((sub) => ({
-          subject: sub,
-          marks: Number((item.totalMarks / sheet.detectedSubjects.length).toFixed(1)),
-          maxMarks: maxMarksPerSubject,
-        }));
+          const explicitSubjectScores = item.subjectScores.map((s) => ({
+            subject: s.subject,
+            marks: s.marks,
+            maxMarks: maxMarksPerSubject,
+          }));
+          const fallbackSubjectScores = sheet.detectedSubjects.map((sub) => ({
+            subject: sub,
+            marks: Number((item.totalMarks / sheet.detectedSubjects.length).toFixed(1)),
+            maxMarks: maxMarksPerSubject,
+          }));
 
-        await prisma.testResult.create({
-          data: {
-            assessmentId: assessment.id,
-            studentId,
-            totalMarks: item.totalMarks,
-            percentage: computedPercentage,
-            percentile: std?.percentile ?? 100,
-            zScore: std?.zScore ?? 0,
-            campusRank: computedCampusRank,
-            overallRank: computedCampusRank,
-            present: true,
-            subjectScores: {
-              create: explicitSubjectScores.length > 0 ? explicitSubjectScores : fallbackSubjectScores,
-            },
-          },
-        });
-
-        sheetImported++;
-        resultsImported++;
-      }
-
-      for (const item of sheet.parsedData) {
-        const studentId = studentMap.get(item.rollNo);
-        if (!studentId) continue;
-
-        const studentResults = await prisma.testResult.findMany({
-          where: { studentId },
-          orderBy: { assessment: { examDate: "asc" } },
-          include: { assessment: true },
-        });
-
-        const percentiles = studentResults.map((r) => r.percentile ?? 0);
-        const percentages = studentResults.map((r) => r.percentage);
-        const latestIdx = studentResults.findIndex((r) => r.assessmentId === assessment.id);
-
-        if (latestIdx >= 0) {
-          const recent = percentiles.slice(0, latestIdx + 1);
-          const prevPercentile = latestIdx > 0 ? percentiles[latestIdx - 1] : percentiles[latestIdx];
-          const drift = classifyDrift(prevPercentile, percentiles[latestIdx], recent);
-
-          await prisma.performanceTrend.upsert({
-            where: { studentId_assessmentId: { studentId, assessmentId: assessment.id } },
-            update: {
-              rollingAvg3: rollingAverage(percentages.slice(0, latestIdx + 1), 3),
-              rollingAvg5: rollingAverage(percentages.slice(0, latestIdx + 1), 5),
-              velocity: computeVelocity(percentages.slice(0, latestIdx + 1)),
-              driftStatus: drift,
-              statusFrom: latestIdx > 0 ? percentiles[latestIdx - 1] : null,
-              statusTo: percentiles[latestIdx],
-            },
-            create: {
-              studentId,
+          await prisma.testResult.create({
+            data: {
               assessmentId: assessment.id,
-              rollingAvg3: rollingAverage(percentages.slice(0, latestIdx + 1), 3),
-              rollingAvg5: rollingAverage(percentages.slice(0, latestIdx + 1), 5),
-              velocity: computeVelocity(percentages.slice(0, latestIdx + 1)),
-              driftStatus: drift,
-              statusFrom: latestIdx > 0 ? percentiles[latestIdx - 1] : null,
-              statusTo: percentiles[latestIdx],
+              studentId,
+              totalMarks: item.totalMarks,
+              percentage: computedPercentage,
+              percentile: std?.percentile ?? 100,
+              zScore: std?.zScore ?? 0,
+              campusRank: computedCampusRank,
+              overallRank: computedCampusRank,
+              present: true,
+              subjectScores: {
+                create: explicitSubjectScores.length > 0 ? explicitSubjectScores : fallbackSubjectScores,
+              },
             },
           });
-        }
-      }
+
+          sheetImported++;
+          resultsImported++;
+        })
+      );
+
+      // Parallelize performance trends computation
+      await Promise.all(
+        sheet.parsedData.map(async (item) => {
+          const studentId = studentMap.get(item.rollNo);
+          if (!studentId) return;
+
+          const studentResults = await prisma.testResult.findMany({
+            where: { studentId },
+            orderBy: { assessment: { examDate: "asc" } },
+            include: { assessment: true },
+          });
+
+          const percentiles = studentResults.map((r) => r.percentile ?? 0);
+          const percentages = studentResults.map((r) => r.percentage);
+          const latestIdx = studentResults.findIndex((r) => r.assessmentId === assessment.id);
+
+          if (latestIdx >= 0) {
+            const recent = percentiles.slice(0, latestIdx + 1);
+            const prevPercentile = latestIdx > 0 ? percentiles[latestIdx - 1] : percentiles[latestIdx];
+            const drift = classifyDrift(prevPercentile, percentiles[latestIdx], recent);
+
+            await prisma.performanceTrend.upsert({
+              where: { studentId_assessmentId: { studentId, assessmentId: assessment.id } },
+              update: {
+                rollingAvg3: rollingAverage(percentages.slice(0, latestIdx + 1), 3),
+                rollingAvg5: rollingAverage(percentages.slice(0, latestIdx + 1), 5),
+                velocity: computeVelocity(percentages.slice(0, latestIdx + 1)),
+                driftStatus: drift,
+                statusFrom: latestIdx > 0 ? percentiles[latestIdx - 1] : null,
+                statusTo: percentiles[latestIdx],
+              },
+              create: {
+                studentId,
+                assessmentId: assessment.id,
+                rollingAvg3: rollingAverage(percentages.slice(0, latestIdx + 1), 3),
+                rollingAvg5: rollingAverage(percentages.slice(0, latestIdx + 1), 5),
+                velocity: computeVelocity(percentages.slice(0, latestIdx + 1)),
+                driftStatus: drift,
+                statusFrom: latestIdx > 0 ? percentiles[latestIdx - 1] : null,
+                statusTo: percentiles[latestIdx],
+              },
+            });
+          }
+        })
+      );
 
       const top15Results = await prisma.testResult.findMany({
         where: { assessmentId: assessment.id },
