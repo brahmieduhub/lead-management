@@ -385,49 +385,170 @@ export async function POST(req: Request) {
     }
 
     // ─── QUESTION-WISE RESULTS UPLOAD ────────────────────────────────────────
-    // uploadType = "question-results"
-    // File format: QuestionWiseAnalysis XLS (one sheet per student)
-    // Each sheet: header rows with Roll No, Score, Percent, Rank
-    // Data rows: QuestionNo(col2) | Subject(col4) | Answer(col7) | Key(col9) | Result(col11) | Marks(col13)
-    if (uploadType === "question-results") {
-      const assessmentId = form.get("assessmentId") ? String(form.get("assessmentId")) : null;
-      if (!assessmentId) {
-        return NextResponse.json({ error: "assessmentId is required for question-results upload" }, { status: 400 });
-      }
-      const wb = XLSX.read(buffer, { type: "buffer" });
-      // Pre-fetch all assessment questions for this assessment
-      const assessmentQuestions = await prisma.assessmentQuestion.findMany({
-        where: { assessmentId },
-      });
-      if (assessmentQuestions.length === 0) {
-        return NextResponse.json({
-          error: "No question mapping found for this assessment. Please upload the question mapping first.",
-        }, { status: 400 });
-      }
-      const qMap = new Map(assessmentQuestions.map((q) => [q.questionNo, q]));
+    // uploadType = "question-results" OR auto-detected QuestionWiseAnalysis workbook
+    const isQuestionWiseWorkbook =
+      uploadType === "question-results" ||
+      workbook.SheetNames[0] === "Document map" ||
+      workbook.SheetNames.some((n) => n.toLowerCase().includes("sheet"));
 
-      let studentsProcessed = 0; let responsesCreated = 0; let skipped = 0;
+    if (uploadType === "question-results" || (isQuestionWiseWorkbook && workbook.SheetNames[0] === "Document map")) {
+      const dataSheets = workbook.SheetNames.filter((n) => n !== workbook.SheetNames[0]);
+      if (dataSheets.length === 0) {
+        return NextResponse.json({ error: "No student data sheets found in QuestionWise workbook" }, { status: 400 });
+      }
+
+      // Read sample sheet to extract assessment metadata
+      const firstWs = workbook.Sheets[dataSheets[0]];
+      const firstRawRows = XLSX.utils.sheet_to_json<unknown[]>(firstWs, { header: 1, defval: "" }) as unknown[][];
+      
+      const titleBanner = String(firstRawRows[4]?.[1] ?? firstRawRows[2]?.[1] ?? "QuestionWise Assessment").trim();
+      const extractedTitle = titleBanner.split("\n")[0] || "QuestionWise Assessment";
+      const extractedDate = parseDateString(titleBanner) || new Date();
+      const inferredStream: "JEE" | "NEET" = /NEET|BIO|BOT|ZOO/i.test(titleBanner) ? "NEET" : "JEE";
+
+      // 1. Resolve Target Batch
+      const targetBatch = await resolveTargetBatch(
+        requestedBatchId,
+        inferredStream,
+        isSuper,
+        userCampusId
+      );
+
+      // 2. Resolve Assessment
+      let effectiveAssessmentId = form.get("assessmentId") ? String(form.get("assessmentId")) : null;
+      let assessment = effectiveAssessmentId
+        ? await prisma.assessment.findUnique({ where: { id: effectiveAssessmentId } })
+        : null;
+
+      if (!assessment) {
+        assessment = await prisma.assessment.findFirst({
+          where: { title: extractedTitle, batchId: targetBatch.id },
+        });
+      }
+
+      if (!assessment) {
+        assessment = await prisma.assessment.create({
+          data: {
+            title: extractedTitle,
+            batchId: targetBatch.id,
+            campusId: targetBatch.campusId,
+            examDate: extractedDate,
+            totalMarks: 160,
+            status: "PUBLISHED",
+          },
+        });
+      }
+      effectiveAssessmentId = assessment.id;
+
+      // 3. Auto-populate Assessment Questions if missing
+      let assessmentQuestions = await prisma.assessmentQuestion.findMany({
+        where: { assessmentId: effectiveAssessmentId },
+      });
+
+      if (assessmentQuestions.length === 0) {
+        const questionRowsSample = firstRawRows.filter((r) => typeof (r as unknown[])[2] === "number");
+        const questionsToCreate = [];
+
+        for (const row of questionRowsSample) {
+          const r = row as unknown[];
+          const questionNo = r[2] as number;
+          const subjectRaw = String(r[4] ?? "").trim();
+          const subject = mapSubjectName(subjectRaw) || subjectRaw.toUpperCase() || "General";
+          const correctKey = String(r[9] ?? "").trim().toUpperCase() || null;
+          const marks = parseFloat(String(r[13] ?? "1")) || 1;
+
+          questionsToCreate.push({
+            assessmentId: effectiveAssessmentId,
+            questionNo,
+            subject,
+            maxMarks: marks > 0 ? marks : 1,
+            correctKey,
+          });
+        }
+
+        if (questionsToCreate.length > 0) {
+          for (const q of questionsToCreate) {
+            await prisma.assessmentQuestion.upsert({
+              where: { assessmentId_questionNo: { assessmentId: effectiveAssessmentId, questionNo: q.questionNo } },
+              update: { subject: q.subject, correctKey: q.correctKey, maxMarks: q.maxMarks },
+              create: q,
+            });
+          }
+          assessmentQuestions = await prisma.assessmentQuestion.findMany({
+            where: { assessmentId: effectiveAssessmentId },
+          });
+        }
+      }
+
+      const qMap = new Map(assessmentQuestions.map((q) => [q.questionNo, q]));
+      let studentsProcessed = 0;
+      let responsesCreated = 0;
+      let skipped = 0;
       const errors: string[] = [];
 
-      // Skip "Document map" / first sheet — process Sheet2 onwards
-      const dataSheets = wb.SheetNames.filter((n) => n !== wb.SheetNames[0]);
-
       for (const sheetName of dataSheets) {
-        const ws = wb.Sheets[sheetName];
+        const ws = workbook.Sheets[sheetName];
         if (!ws) continue;
         const rawRows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "" }) as unknown[][];
 
-        // Extract roll number from row 7, col 3
-        const rollNo = String(rawRows[7]?.[3] ?? "").trim();
+        // Extract roll number from row index 7, col 3 (or scan top 10 rows for "Roll No")
+        let rollNo = String(rawRows[7]?.[3] ?? "").trim();
+        let studentName = String(rawRows[6]?.[3] ?? "").trim();
+
+        if (!rollNo) {
+          for (let r = 0; r < Math.min(rawRows.length, 12); r++) {
+            const row = rawRows[r];
+            if (!Array.isArray(row)) continue;
+            const idx = row.findIndex((c) => /roll\s*no/i.test(String(c ?? "")));
+            if (idx >= 0 && row[idx + 1] !== undefined && String(row[idx + 1]).trim() !== "") {
+              rollNo = String(row[idx + 1]).trim();
+              break;
+            } else if (idx >= 0 && row[idx + 2] !== undefined && String(row[idx + 2]).trim() !== "") {
+              rollNo = String(row[idx + 2]).trim();
+              break;
+            }
+          }
+        }
+
         if (!rollNo) { skipped++; continue; }
 
-        // Find student and their test result for this assessment
-        const student = await prisma.student.findUnique({ where: { rollNo } });
-        if (!student) { errors.push(`Roll ${rollNo}: student not found`); skipped++; continue; }
-        const testResult = await prisma.testResult.findUnique({
-          where: { assessmentId_studentId: { assessmentId, studentId: student.id } },
+        // Find or auto-create student
+        let student = await prisma.student.findUnique({ where: { rollNo } });
+        if (!student) {
+          student = await prisma.student.create({
+            data: {
+              rollNo,
+              name: studentName || `Student ${rollNo}`,
+              batchId: targetBatch.id,
+            },
+          });
+        }
+
+        // Extract score, percent, rank
+        const scoreStr = String(rawRows[9]?.[3] ?? "0").trim();
+        const totalMarksScored = parseFloat(scoreStr.split("/")[0]) || 0;
+        const percent = parseFloat(String(rawRows[10]?.[3] ?? "0")) || Number(((totalMarksScored / (assessment.totalMarks || 160)) * 100).toFixed(2));
+        const rank = parseInt(String(rawRows[11]?.[3] ?? "1"), 10) || 1;
+
+        // Find or auto-create testResult
+        let testResult = await prisma.testResult.findUnique({
+          where: { studentId_assessmentId: { assessmentId: effectiveAssessmentId, studentId: student.id } },
         });
-        if (!testResult) { errors.push(`Roll ${rollNo}: no test result for this assessment`); skipped++; continue; }
+
+        if (!testResult) {
+          testResult = await prisma.testResult.create({
+            data: {
+              assessmentId: effectiveAssessmentId,
+              studentId: student.id,
+              totalMarks: totalMarksScored,
+              percentage: percent,
+              percentile: Math.max(1, 100 - (rank * 2)),
+              campusRank: rank,
+              batchRank: rank,
+              present: true,
+            },
+          });
+        }
 
         // Delete existing responses for idempotency
         await prisma.studentQuestionResponse.deleteMany({ where: { testResultId: testResult.id } });
@@ -435,8 +556,11 @@ export async function POST(req: Request) {
         // Parse question rows: question number is a number in col 2
         const questionRows = rawRows.filter((r) => typeof (r as unknown[])[2] === "number");
         const responseData: {
-          testResultId: string; assessmentQuestionId: string;
-          studentAnswer: string | null; result: AttemptResult; marksScored: number;
+          testResultId: string;
+          assessmentQuestionId: string;
+          studentAnswer: string | null;
+          result: AttemptResult;
+          marksScored: number;
         }[] = [];
 
         for (const row of questionRows) {
@@ -447,9 +571,14 @@ export async function POST(req: Request) {
           const marksScored = parseFloat(String(r[13] ?? "0")) || 0;
           const q = qMap.get(questionNo);
           if (!q) continue;
+
           const result: AttemptResult =
-            resultCode === "P" ? "CORRECT" :
-            studentAnswer === null || studentAnswer === "" ? "UNATTEMPTED" : "WRONG";
+            resultCode === "P"
+              ? "CORRECT"
+              : studentAnswer === null || studentAnswer === ""
+              ? "UNATTEMPTED"
+              : "WRONG";
+
           responseData.push({
             testResultId: testResult.id,
             assessmentQuestionId: q.id,
@@ -462,14 +591,13 @@ export async function POST(req: Request) {
         if (responseData.length > 0) {
           await prisma.studentQuestionResponse.createMany({ data: responseData });
           responsesCreated += responseData.length;
-          // Compute subtopic summary for this student
-          await computeSubtopicSummary(testResult.id, assessmentId);
+          await computeSubtopicSummary(testResult.id, effectiveAssessmentId);
         }
         studentsProcessed++;
       }
 
-      // Trigger center-level AI summary generation asynchronously
-      generateAssessmentSummary(assessmentId).catch((err) => {
+      // Background AI summary
+      generateAssessmentSummary(effectiveAssessmentId).catch((err) => {
         console.error("Failed to generate AI summary in background:", err);
       });
 
@@ -477,8 +605,10 @@ export async function POST(req: Request) {
         imported: responsesCreated,
         studentsProcessed,
         skipped,
+        assessmentTitle: assessment.title,
+        batchName: targetBatch.name,
         errors: errors.slice(0, 10),
-        message: `Question-wise responses imported: ${responsesCreated} responses across ${studentsProcessed} students.${skipped ? ` Skipped ${skipped}.` : ""}`,
+        message: `Imported ${responsesCreated} question responses across ${studentsProcessed} students for "${assessment.title}".`,
       });
     }
 
