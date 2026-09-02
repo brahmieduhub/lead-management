@@ -338,6 +338,7 @@ export async function POST(req: Request) {
 
   try {
     const buffer = Buffer.from(await file.arrayBuffer());
+    const workbook = XLSX.read(buffer, { type: "buffer" });
 
     // ─── QUESTION MAPPING UPLOAD ─────────────────────────────────────────────
     // uploadType = "question-mapping"
@@ -431,7 +432,6 @@ export async function POST(req: Request) {
           data: {
             title: extractedTitle,
             batchId: targetBatch.id,
-            campusId: targetBatch.campusId,
             examDate: extractedDate,
             totalMarks: 160,
             status: "PUBLISHED",
@@ -532,7 +532,7 @@ export async function POST(req: Request) {
 
         // Find or auto-create testResult
         let testResult = await prisma.testResult.findUnique({
-          where: { studentId_assessmentId: { assessmentId: effectiveAssessmentId, studentId: student.id } },
+          where: { assessmentId_studentId: { assessmentId: effectiveAssessmentId, studentId: student.id } },
         });
 
         if (!testResult) {
@@ -544,7 +544,7 @@ export async function POST(req: Request) {
               percentage: percent,
               percentile: Math.max(1, 100 - (rank * 2)),
               campusRank: rank,
-              batchRank: rank,
+              overallRank: rank,
               present: true,
             },
           });
@@ -613,7 +613,6 @@ export async function POST(req: Request) {
     }
 
     // ─── STANDARD RESULTS / STUDENTS UPLOAD ──────────────────────────────────
-    const workbook = XLSX.read(buffer, { type: "buffer" });
     const parsedSheets = workbook.SheetNames
       .map((sheetName) => parseWorksheet(sheetName, workbook.Sheets[sheetName]))
       .filter((sheet): sheet is ParsedSheetData => Boolean(sheet));
