@@ -111,11 +111,10 @@ export async function GET() {
       assessment = await prisma.assessment.create({
         data: {
           title: "NEET Grand Mock Test - 01",
-          stream: ExamType.NEET,
           batchId: batchNeet.id,
-          campusId: campusHyd.id,
           totalMarks: 720,
           examDate: new Date(),
+          status: "PUBLISHED",
         },
       });
     }
@@ -131,33 +130,36 @@ export async function GET() {
 
     for (const sc of scores) {
       const tr = await prisma.testResult.upsert({
-        where: { studentId_assessmentId: { studentId: sc.studentId, assessmentId: assessment.id } },
-        update: { totalMarks: sc.total, percentage: sc.pct, campusRank: sc.rank, batchRank: sc.rank },
+        where: { assessmentId_studentId: { assessmentId: assessment.id, studentId: sc.studentId } },
+        update: { totalMarks: sc.total, percentage: sc.pct, campusRank: sc.rank, overallRank: sc.rank },
         create: {
           studentId: sc.studentId,
           assessmentId: assessment.id,
           totalMarks: sc.total,
           percentage: sc.pct,
           campusRank: sc.rank,
-          batchRank: sc.rank,
+          overallRank: sc.rank,
+          present: true,
         },
       });
 
       // Add Subject Scores
       const subjects = [
-        { subject: "PHYSICS", score: sc.phy, max: 180 },
-        { subject: "CHEMISTRY", score: sc.che, max: 180 },
-        { subject: "BOTANY", score: sc.bot, max: 180 },
-        { subject: "ZOOLOGY", score: sc.zoo, max: 180 },
+        { subject: "Physics", marks: sc.phy, maxMarks: 180 },
+        { subject: "Chemistry", marks: sc.che, maxMarks: 180 },
+        { subject: "Botany", marks: sc.bot, maxMarks: 180 },
+        { subject: "Zoology", marks: sc.zoo, maxMarks: 180 },
       ];
 
-      for (const sub of subjects) {
-        await prisma.subjectScore.upsert({
-          where: { testResultId_subject: { testResultId: tr.id, subject: sub.subject } },
-          update: { score: sub.score },
-          create: { testResultId: tr.id, subject: sub.subject, score: sub.score, maxMarks: sub.max },
-        });
-      }
+      await prisma.subjectScore.deleteMany({ where: { testResultId: tr.id } });
+      await prisma.subjectScore.createMany({
+        data: subjects.map((sub) => ({
+          testResultId: tr.id,
+          subject: sub.subject,
+          marks: sub.marks,
+          maxMarks: sub.maxMarks,
+        })),
+      });
     }
 
     return NextResponse.json({

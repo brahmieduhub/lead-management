@@ -44,27 +44,47 @@ interface ParsedSheetData {
 }
 
 function parseDateString(dateStr: string): Date | null {
+  // 1. Matches DD-MM-YYYY, DD/MM/YYYY, YYYY-MM-DD, D-M-YYYY
   const match = dateStr.match(/\b(\d{1,4})[-/.](\d{1,2})[-/.](\d{1,4})\b/);
-  if (!match) return null;
+  if (match) {
+    const [, part1, part2, part3] = match;
+    let day: number;
+    let month: number;
+    let year: number;
 
-  const [, part1, part2, part3] = match;
-  let day: number;
-  let month: number;
-  let year: number;
+    if (part1.length === 4) {
+      year = parseInt(part1, 10);
+      month = parseInt(part2, 10);
+      day = parseInt(part3, 10);
+    } else {
+      day = parseInt(part1, 10);
+      month = parseInt(part2, 10);
+      year = parseInt(part3.length === 2 ? `20${part3}` : part3, 10);
+    }
 
-  if (part1.length === 4) {
-    year = parseInt(part1, 10);
-    month = parseInt(part2, 10);
-    day = parseInt(part3, 10);
-  } else {
-    day = parseInt(part1, 10);
-    month = parseInt(part2, 10);
-    year = parseInt(part3.length === 2 ? `20${part3}` : part3, 10);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && year >= 2000) {
+      return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    }
   }
 
-  if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && year >= 2000) {
-    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  // 2. Matches text months like 17-Aug-2026, 01-August-2026
+  const textMonthMatch = dateStr.match(
+    /\b(\d{1,2})[-/\s]+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\s]+(\d{2,4})\b/i
+  );
+  if (textMonthMatch) {
+    const months: Record<string, number> = {
+      jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+    };
+    const day = parseInt(textMonthMatch[1], 10);
+    const mStr = textMonthMatch[2].slice(0, 3).toLowerCase();
+    const month = months[mStr];
+    let year = parseInt(textMonthMatch[3], 10);
+    if (year < 100) year += 2000;
+    if (month && day >= 1 && day <= 31 && year >= 2000) {
+      return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    }
   }
+
   return null;
 }
 
