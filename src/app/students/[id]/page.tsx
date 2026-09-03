@@ -4,6 +4,7 @@ import { formatDate, formatPercent, getDriftColor, getDriftLabel } from "@/lib/u
 import DiagnosticReport from "@/components/DiagnosticReport";
 import { getSession, isSuperAdmin } from "@/lib/auth";
 import { getStudentSubtopicTrend } from "@/lib/subtopicAnalytics";
+import SideBySideChatAgent from "@/components/SideBySideChatAgent";
 
 export const dynamic = "force-dynamic";
 
@@ -83,124 +84,146 @@ export default async function StudentDetailPage({ params }: { params: { id: stri
         </div>
       </div>
 
-      {/* Performance History */}
-      <div className="card border border-slate-200 overflow-hidden">
-        <div className="card-header border-b border-slate-100 px-5 py-3 flex items-center justify-between">
-          <h2 className="font-bold text-slate-800 text-sm">Performance & Subject Breakdown History</h2>
-          <span className="text-xs text-slate-400">{student.testResults.length} Tests Recorded</span>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-200 text-sm">
-            <thead className="bg-slate-50 text-slate-600 font-semibold">
-              <tr>
-                <th className="px-4 py-2.5 text-left font-medium">Assessment Title</th>
-                <th className="px-4 py-2.5 text-left font-medium">Date</th>
-                <th className="px-4 py-2.5 text-left font-medium">Subject Scores</th>
-                <th className="px-4 py-2.5 text-center font-medium">Total</th>
-                <th className="px-4 py-2.5 text-center font-medium">%</th>
-                <th className="px-4 py-2.5 text-center font-medium">Percentile</th>
-                <th className="px-4 py-2.5 text-center font-medium">Center Rank</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 bg-white">
-              {student.testResults.map((r) => (
-                <tr key={r.id} className="hover:bg-slate-50 transition">
-                  <td className="px-4 py-2.5 font-semibold text-slate-800">{r.assessment.title}</td>
-                  <td className="px-4 py-2.5 text-xs text-slate-500">{formatDate(r.assessment.examDate)}</td>
-                  <td className="px-4 py-2.5 text-xs font-mono text-slate-700">
-                    {r.subjectScores.map((s) => `${s.subject.slice(0, 3)}: ${s.marks}`).join(" | ") || "—"}
-                  </td>
-                  <td className="px-4 py-2.5 text-center font-mono font-bold text-slate-800">
-                    {r.totalMarks} <span className="text-xs text-slate-400">/{r.assessment.totalMarks}</span>
-                  </td>
-                  <td className="px-4 py-2.5 text-center font-mono text-slate-700 font-medium">
-                    {formatPercent(r.percentage)}
-                  </td>
-                  <td className="px-4 py-2.5 text-center font-mono text-slate-600">
-                    {r.percentile != null ? r.percentile.toFixed(1) : "—"}
-                  </td>
-                  <td className="px-4 py-2.5 text-center font-mono font-bold text-slate-700">
-                    #{r.campusRank}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Subtopic Trend Panel */}
-      {hasSubtopicData && (
-        <div className="card border border-slate-200 overflow-hidden">
-          <div className="card-header border-b border-slate-100 px-5 py-3 flex items-center justify-between">
-            <h2 className="font-bold text-slate-800 text-sm">
-              Cross-Assessment Subtopic Trend
-            </h2>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-slate-400">{subtopicTrend.length} subtopics tracked</span>
+      {/* Side-by-Side Content Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+        {/* Left 2 Columns: Reports, History & Subtopic Analytics */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* Performance History */}
+          <div className="card border border-slate-200 overflow-hidden">
+            <div className="card-header border-b border-slate-100 px-5 py-3 flex items-center justify-between">
+              <h2 className="font-bold text-slate-800 text-sm">Performance & Subject Breakdown History</h2>
+              <span className="text-xs text-slate-400">{student.testResults.length} Tests Recorded</span>
             </div>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-200 text-sm">
-              <thead className="bg-slate-50 text-slate-600 font-semibold">
-                <tr>
-                  <th className="px-4 py-2.5 text-left font-medium">Subject</th>
-                  <th className="px-4 py-2.5 text-left font-medium">Chapter</th>
-                  <th className="px-4 py-2.5 text-left font-medium">Subtopic</th>
-                  <th className="px-4 py-2.5 text-center font-medium">Trend History (Latest First)</th>
-                  <th className="px-4 py-2.5 text-center font-medium">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 bg-white">
-                {subtopicTrend.map((s, i) => {
-                  const sortedHistory = [...s.history].sort((a, b) => b.examDate.getTime() - a.examDate.getTime());
-                  const latest = sortedHistory[0];
-                  const isWeak = latest && latest.accuracy < 50;
-                  
-                  let trendIcon = "—";
-                  let trendColor = "text-slate-400";
-                  if (sortedHistory.length >= 2) {
-                    const diff = sortedHistory[0].accuracy - sortedHistory[1].accuracy;
-                    if (diff >= 10) { trendIcon = "↑↑"; trendColor = "text-emerald-600"; }
-                    else if (diff > 0) { trendIcon = "↑"; trendColor = "text-emerald-500"; }
-                    else if (diff <= -10) { trendIcon = "↓↓"; trendColor = "text-red-600"; }
-                    else if (diff < 0) { trendIcon = "↓"; trendColor = "text-red-500"; }
-                    else { trendIcon = "→"; }
-                  }
-
-                  return (
-                    <tr key={i} className={isWeak ? "bg-red-50" : "hover:bg-slate-50"}>
-                      <td className="px-4 py-2.5 font-semibold text-slate-700">{s.subject}</td>
-                      <td className="px-4 py-2.5 text-slate-500 text-xs">{s.chapter}</td>
-                      <td className="px-4 py-2.5 text-slate-800">{s.subtopic}</td>
-                      <td className="px-4 py-2.5 text-center">
-                        <div className="flex items-center justify-center gap-1.5 flex-wrap">
-                          {sortedHistory.slice(0, 3).map((h, hi) => (
-                            <span 
-                              key={hi} 
-                              className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${h.accuracy < 50 ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}
-                              title={h.assessmentTitle}
-                            >
-                              {h.accuracy}%
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <thead className="bg-slate-50 text-slate-600 font-semibold">
+                  <tr>
+                    <th className="px-4 py-2.5 text-left font-medium">Assessment Title</th>
+                    <th className="px-4 py-2.5 text-left font-medium">Date</th>
+                    <th className="px-4 py-2.5 text-left font-medium">Subject Scores</th>
+                    <th className="px-4 py-2.5 text-center font-medium">Total</th>
+                    <th className="px-4 py-2.5 text-center font-medium">%</th>
+                    <th className="px-4 py-2.5 text-center font-medium">Percentile</th>
+                    <th className="px-4 py-2.5 text-center font-medium">Rank</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 bg-white">
+                  {student.testResults.map((r) => (
+                    <tr key={r.id} className="hover:bg-slate-50">
+                      <td className="px-4 py-2.5 font-medium text-slate-900">{r.assessment.title}</td>
+                      <td className="px-4 py-2.5 text-slate-500">{formatDate(r.assessment.examDate)}</td>
+                      <td className="px-4 py-2.5">
+                        <div className="flex flex-wrap gap-1">
+                          {r.subjectScores.map((s) => (
+                            <span key={s.id} className="badge bg-slate-100 text-slate-700 text-xs">
+                              {s.subject}: {s.marks}/{s.maxMarks}
                             </span>
                           ))}
                         </div>
                       </td>
-                      <td className="px-4 py-2.5 text-center font-bold text-base">
-                        <span className={trendColor} title="Trend vs previous assessment">{trendIcon}</span>
-                        {isWeak && <span className="ml-2 badge bg-red-100 text-red-700 text-[10px] uppercase font-bold">Weak</span>}
+                      <td className="px-4 py-2.5 text-center font-bold text-slate-800">
+                        {r.totalMarks}/{r.assessment.totalMarks}
+                      </td>
+                      <td className="px-4 py-2.5 text-center font-bold text-primary-700">
+                        {formatPercent(r.percentage)}
+                      </td>
+                      <td className="px-4 py-2.5 text-center text-slate-600">
+                        {r.percentile != null ? r.percentile.toFixed(1) : "—"}
+                      </td>
+                      <td className="px-4 py-2.5 text-center font-mono font-bold text-slate-700">
+                        #{r.campusRank}
                       </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
-      )}
 
-      {/* AI Diagnostic Engine */}
-      <DiagnosticReport studentId={student.id} existing={student.diagnostics[0]} />
+          {/* Subtopic Trend Panel */}
+          {hasSubtopicData && (
+            <div className="card border border-slate-200 overflow-hidden">
+              <div className="card-header border-b border-slate-100 px-5 py-3 flex items-center justify-between">
+                <h2 className="font-bold text-slate-800 text-sm">Cross-Assessment Subtopic Trend</h2>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-slate-400">{subtopicTrend.length} subtopics tracked</span>
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-50 text-slate-600 font-semibold">
+                    <tr>
+                      <th className="px-4 py-2.5 text-left font-medium">Subject</th>
+                      <th className="px-4 py-2.5 text-left font-medium">Chapter</th>
+                      <th className="px-4 py-2.5 text-left font-medium">Subtopic</th>
+                      <th className="px-4 py-2.5 text-center font-medium">Trend History</th>
+                      <th className="px-4 py-2.5 text-center font-medium">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {subtopicTrend.map((s, i) => {
+                      const sortedHistory = [...s.history].sort((a, b) => b.examDate.getTime() - a.examDate.getTime());
+                      const latest = sortedHistory[0];
+                      const isWeak = latest && latest.accuracy < 50;
+
+                      let trendIcon = "—";
+                      let trendColor = "text-slate-400";
+                      if (sortedHistory.length >= 2) {
+                        const diff = sortedHistory[0].accuracy - sortedHistory[1].accuracy;
+                        if (diff >= 10) { trendIcon = "↑↑"; trendColor = "text-emerald-600"; }
+                        else if (diff > 0) { trendIcon = "↑"; trendColor = "text-emerald-500"; }
+                        else if (diff <= -10) { trendIcon = "↓↓"; trendColor = "text-red-600"; }
+                        else if (diff < 0) { trendIcon = "↓"; trendColor = "text-red-500"; }
+                        else { trendIcon = "→"; }
+                      }
+
+                      return (
+                        <tr key={i} className={isWeak ? "bg-red-50" : "hover:bg-slate-50"}>
+                          <td className="px-4 py-2.5 font-semibold text-slate-700">{s.subject}</td>
+                          <td className="px-4 py-2.5 text-slate-500 text-xs">{s.chapter}</td>
+                          <td className="px-4 py-2.5 text-slate-800">{s.subtopic}</td>
+                          <td className="px-4 py-2.5 text-center">
+                            <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                              {sortedHistory.slice(0, 3).map((h, hi) => (
+                                <span
+                                  key={hi}
+                                  className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                                    h.accuracy < 50 ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"
+                                  }`}
+                                  title={h.assessmentTitle}
+                                >
+                                  {h.accuracy}%
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="px-4 py-2.5 text-center font-bold text-base">
+                            <span className={trendColor} title="Trend vs previous assessment">{trendIcon}</span>
+                            {isWeak && <span className="ml-2 badge bg-red-100 text-red-700 text-[10px] uppercase font-bold">Weak</span>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* AI Diagnostic Engine Report */}
+          <DiagnosticReport studentId={student.id} existing={student.diagnostics[0]} />
+        </div>
+
+        {/* Right 1 Column: Side-by-Side Interactive AI Chat Agent */}
+        <div className="lg:col-span-1">
+          <SideBySideChatAgent
+            studentId={student.id}
+            studentName={student.name}
+            studentRollNo={student.rollNo}
+            batchName={student.batch.name}
+          />
+        </div>
+      </div>
     </div>
   );
 }
