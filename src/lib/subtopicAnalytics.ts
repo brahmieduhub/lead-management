@@ -165,3 +165,21 @@ export async function computeSubtopicSummary(
     });
   }
 }
+
+/**
+ * Re-computes and refreshes StudentSubtopicSummary rows for ALL test results in an assessment.
+ * Called when questions are newly mapped or updated.
+ */
+export async function recalculateSubtopicsForAssessment(assessmentId: string): Promise<number> {
+  const testResults = await prisma.testResult.findMany({
+    where: { assessmentId },
+    select: { id: true },
+  });
+
+  for (const tr of testResults) {
+    await computeSubtopicSummary(tr.id, assessmentId);
+  }
+
+  return testResults.length;
+}
+

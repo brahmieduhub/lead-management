@@ -5,6 +5,7 @@ import DiagnosticReport from "@/components/DiagnosticReport";
 import { getSession, isSuperAdmin } from "@/lib/auth";
 import { getStudentSubtopicTrend } from "@/lib/subtopicAnalytics";
 import SideBySideChatAgent from "@/components/SideBySideChatAgent";
+import MultiLevelStrengthWeaknessAnalytics from "@/components/MultiLevelStrengthWeaknessAnalytics";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +43,18 @@ export default async function StudentDetailPage({ params }: { params: { id: stri
   // Fetch cross-assessment subtopic trend
   const subtopicTrend = await getStudentSubtopicTrend(student.id);
   const hasSubtopicData = subtopicTrend.length > 0;
+
+  // Fetch cumulative/latest subtopic summaries for the multi-level matrix
+  const subtopicRows = await prisma.studentSubtopicSummary.findMany({
+    where: { testResult: { studentId: student.id } },
+    orderBy: { accuracy: "asc" },
+  });
+  const subtopicMap = new Map<string, (typeof subtopicRows)[0]>();
+  for (const s of subtopicRows) {
+    const key = `${s.subject}||${s.chapter}||${s.subtopic}`;
+    if (!subtopicMap.has(key)) subtopicMap.set(key, s);
+  }
+  const uniqueSubtopics = Array.from(subtopicMap.values());
 
   return (
     <div className="space-y-6">
@@ -209,6 +222,25 @@ export default async function StudentDetailPage({ params }: { params: { id: stri
               </div>
             </div>
           )}
+
+          {/* Multi-Level Strengths & Weaknesses Matrix */}
+          <MultiLevelStrengthWeaknessAnalytics
+            overallPercentage={latestResult?.percentage}
+            overallPercentile={latestResult?.percentile ?? undefined}
+            rank={latestResult?.campusRank ?? undefined}
+            totalTests={student.testResults.length}
+            studentName={student.name}
+            subtopics={uniqueSubtopics.map((s) => ({
+              subject: s.subject,
+              chapter: s.chapter,
+              subtopic: s.subtopic,
+              totalQs: s.totalQs,
+              correctQs: s.correctQs,
+              wrongQs: s.wrongQs,
+              unattemptedQs: s.unattemptedQs,
+              accuracy: s.accuracy,
+            }))}
+          />
 
           {/* AI Diagnostic Engine Report */}
           <DiagnosticReport studentId={student.id} existing={student.diagnostics[0]} />

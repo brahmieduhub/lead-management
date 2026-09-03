@@ -3,6 +3,8 @@ import { notFound } from "next/navigation";
 import { getClassSubtopicAccuracy } from "@/lib/subtopicAnalytics";
 import { getSession, isSuperAdmin } from "@/lib/auth";
 
+import QuestionPaperUploader from "@/components/QuestionPaperUploader";
+
 export const dynamic = "force-dynamic";
 
 export default async function AssessmentQuestionsPage({ params }: { params: { id: string } }) {
@@ -39,17 +41,27 @@ export default async function AssessmentQuestionsPage({ params }: { params: { id
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="card p-5 border border-slate-200">
-        <div className="flex items-center gap-2 text-xs text-slate-500 mb-1">
-          <span>{assessment.batch.campus.name}</span>
-          <span>›</span>
-          <span>{assessment.batch.name}</span>
+      {/* Header with Question Paper Upload Action */}
+      <div className="card p-5 border border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2 text-xs text-slate-500 mb-1">
+            <span>{assessment.batch.campus.name}</span>
+            <span>›</span>
+            <span>{assessment.batch.name}</span>
+          </div>
+          <h1 className="text-xl font-bold text-slate-900">{assessment.title}</h1>
+          <p className="text-sm text-slate-500 mt-1">
+            Question-wise Analysis · {assessment.assessmentQuestions.length} questions mapped · {totalStudents} students
+          </p>
         </div>
-        <h1 className="text-xl font-bold text-slate-900">{assessment.title}</h1>
-        <p className="text-sm text-slate-500 mt-1">
-          Question-wise Analysis · {assessment.assessmentQuestions.length} questions · {totalStudents} students
-        </p>
+
+        <div>
+          <QuestionPaperUploader
+            assessmentId={assessment.id}
+            assessmentTitle={assessment.title}
+            stream={assessment.batch.stream}
+          />
+        </div>
       </div>
 
       {/* No mapping warning */}
