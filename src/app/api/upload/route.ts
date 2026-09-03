@@ -522,6 +522,11 @@ export async function POST(req: Request) {
               batchId: targetBatch.id,
             },
           });
+        } else if (studentName && (student.name.startsWith("Student ") || student.name !== studentName)) {
+          student = await prisma.student.update({
+            where: { id: student.id },
+            data: { name: studentName },
+          });
         }
 
         // Extract score, percent, rank
@@ -668,10 +673,17 @@ export async function POST(req: Request) {
               return;
             }
             studentMap.set(item.rollNo, existing.id);
-            if ((item.name && item.name !== existing.name) || (item.phone && !existing.phone)) {
+            const updateData: { name?: string; phone?: string; batchId?: string } = {};
+            if (item.name && item.name !== existing.name) updateData.name = item.name;
+            if (item.phone && item.phone !== existing.phone) updateData.phone = item.phone;
+            if (requestedBatchId && targetBatch.id && existing.batchId !== targetBatch.id) {
+              updateData.batchId = targetBatch.id;
+            }
+
+            if (Object.keys(updateData).length > 0) {
               await prisma.student.update({
                 where: { id: existing.id },
-                data: { name: item.name || existing.name, phone: item.phone || existing.phone },
+                data: updateData,
               });
               studentsUpdated++;
             }
